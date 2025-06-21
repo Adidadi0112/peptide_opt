@@ -6,6 +6,7 @@ use lazy_static::lazy_static;
 use rand::Rng;
 
 // muszę wrzucić GA i dedykowany GA dla tego problemu
+// w genetycznym wstawiamy blanki, które później do oceny usuwamy. z nimi się łatwiej crossuje i mutuje
 
 pub fn aa_index(letter: u8) -> usize {
     AA_LETTERS
@@ -13,15 +14,46 @@ pub fn aa_index(letter: u8) -> usize {
         .position(|&c| c == letter)
         .expect("undefined amino acid")
 }
-// w genetycznym wstawiamy blanki, które później do ocenny usuwamy. z nimi się łatwiej cossuje i mutuje
-const MOTIF: &[u8] = b"GGAGGVGKS"; // więcej ni 10 motywów na przynajmniej 2-3 grupy do testowania
+
+// Multiple motifs for testing
+pub const MOTIFS: [&[u8]; 13] = [
+    b"GGAGGVGKS",
+    b"RGD",                    // Cell adhesion motif
+    b"KDEL",                   // ER retention signal
+    b"PKKP",                   // Modified SH3 domain binding
+    b"YPAF",                   // Modified sorting signal
+    b"DPDGGDGMDDSD",           // Modified calcium binding
+    b"CIGCINGSMRKSDWKNHKPWH",  // Modified zinc finger
+    b"LPEKAYNLALGRCELMYSHKNL", // Modified leucine zipper
+    b"HTH",                    // Helix-turn-helix
+    b"YGRKKRRQRRR",            // HIV-1 Tat protein transduction domain
+    b"RQIKIWFQNRRMKWKK",       // Antennapedia homeodomain
+    b"AGYLLGKLGAALKG",         // Antimicrobial peptide
+    b"KWRWKRWKK",              // Cell-penetrating peptide
+];
+
+// Default motif index to use if none specified
+static mut CURRENT_MOTIF_IDX: usize = 0;
+
+// Set which motif to use
+pub fn set_motif(index: usize) {
+    if index < MOTIFS.len() {
+        unsafe {
+            CURRENT_MOTIF_IDX = index;
+        }
+    }
+}
 
 lazy_static! {
-    // change motif into amino acid indexes
-    static ref MOTIF_IDX: Vec<u8> = {
-        MOTIF
+    // All motifs converted to amino acid indices
+    static ref MOTIF_INDICES: Vec<Vec<u8>> = {
+        MOTIFS
             .iter()
-            .map(|&c| aa_index(c) as u8)
+            .map(|motif| {
+                motif.iter()
+                    .map(|&c| aa_index(c) as u8)
+                    .collect()
+            })
             .collect()
     };
 }
@@ -35,20 +67,62 @@ pub enum Move {
     Delete { pos: usize, aa: u8 },
 }
 
-pub struct PeptideProblem;
+pub struct PeptideProblem {
+    // No fields needed
+}
+
+// Global flag to determine whether to use best motif matching
+static mut USE_BEST_MOTIF: bool = false;
+
+// Public function to set the flag
+pub fn set_use_best_motif(use_best: bool) {
+    unsafe {
+        USE_BEST_MOTIF = use_best;
+    }
+}
+
+// Public function to get the flag value
+pub fn get_use_best_motif() -> bool {
+    unsafe { USE_BEST_MOTIF }
+}
 
 impl PeptideProblem {
     // calculate the energy of a peptide sequence
-    // based on the BLOSUM62 matrix and the motif
+    // based on the BLOSUM62 matrix and the selected motif
     fn energy(ind: &[u8]) -> i32 {
+        // Get the current motif index
+        let motif_idx = unsafe { CURRENT_MOTIF_IDX };
+
+        // Use the selected motif's indices
+        let motif_indices = &MOTIF_INDICES[motif_idx];
+
         ind.iter()
             .enumerate()
             .map(|(i, &aa)| {
                 let a = aa as usize;
-                let b = MOTIF_IDX[i % MOTIF_IDX.len()] as usize;
+                let b = motif_indices[i % motif_indices.len()] as usize;
                 -(BLOSUM62[a][b] as i32)
             })
             .sum()
+    }
+
+    // Calculate energy using all motifs and return the best (minimum) value
+    fn energy_best_motif(ind: &[u8]) -> i32 {
+        (0..MOTIFS.len())
+            .map(|motif_idx| {
+                let motif_indices = &MOTIF_INDICES[motif_idx];
+
+                ind.iter()
+                    .enumerate()
+                    .map(|(i, &aa)| {
+                        let a = aa as usize;
+                        let b = motif_indices[i % motif_indices.len()] as usize;
+                        -(BLOSUM62[a][b] as i32)
+                    })
+                    .sum()
+            })
+            .min()
+            .unwrap_or(0)
     }
 }
 
@@ -62,7 +136,14 @@ impl TSProblem for PeptideProblem {
     }
 
     fn fitness(ind: &Self::Individ) -> f64 {
-        Self::energy(ind) as f64
+        // Use best_motif flag to decide which energy function to use
+        let use_best = unsafe { USE_BEST_MOTIF };
+
+        if use_best {
+            Self::energy_best_motif(ind) as f64
+        } else {
+            Self::energy(ind) as f64
+        }
     }
 
     fn neighbourhood<R: Rng>(
