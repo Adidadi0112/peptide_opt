@@ -1,11 +1,19 @@
+use crate::peptide::combined_fitness;
 use crate::peptide::PeptideProblem;
 use crate::problem::TSProblem;
 use rand::{rngs::StdRng, Rng, SeedableRng};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Crossover {
+    SinglePoint,
+    Uniform,
+}
 
 pub struct GeneticAlgorithm {
     pub population_size: usize,
     pub generations: usize,
     pub crossover_prob: f64,
+    pub crossover: Crossover,
     pub mutation_prob: f64,
     pub tournament_size: usize,
 }
@@ -21,7 +29,7 @@ impl GeneticAlgorithm {
 
             let fitnesses: Vec<f64> = population
                 .iter()
-                .map(|ind| PeptideProblem::fitness(ind))
+                .map(|ind| combined_fitness(ind) as f64)
                 .collect();
 
             let min = *fitnesses
@@ -73,7 +81,7 @@ impl GeneticAlgorithm {
             .iter()
             .min_by(|a, b| {
                 PeptideProblem::fitness(a)
-                    .partial_cmp(&PeptideProblem::fitness(b))
+                    .partial_cmp(&(combined_fitness(b) as f64))
                     .unwrap()
             })
             .unwrap();
@@ -83,11 +91,27 @@ impl GeneticAlgorithm {
 
     fn crossover<R: Rng>(&self, parent1: &Vec<u8>, parent2: &Vec<u8>, rng: &mut R) -> Vec<u8> {
         if rng.gen::<f64>() < self.crossover_prob {
-            // Single point crossover
-            let point = rng.gen_range(1..parent1.len().min(parent2.len()));
-            let mut child = parent1[..point].to_vec();
-            child.extend_from_slice(&parent2[point.min(parent2.len())..]);
-            child
+            match self.crossover {
+                Crossover::SinglePoint => {
+                    // Single point crossover
+                    let point = rng.gen_range(1..parent1.len().min(parent2.len()));
+                    let mut child = parent1[..point].to_vec();
+                    child.extend_from_slice(&parent2[point.min(parent2.len())..]);
+                    child
+                }
+                Crossover::Uniform => {
+                    // Uniform crossover with p=0.5
+                    let mut child = Vec::with_capacity(parent1.len());
+                    for i in 0..parent1.len().min(parent2.len()) {
+                        if rng.gen::<f64>() < 0.5 {
+                            child.push(parent1[i]);
+                        } else {
+                            child.push(parent2[i]);
+                        }
+                    }
+                    child
+                }
+            }
         } else {
             parent1.clone()
         }
@@ -95,10 +119,10 @@ impl GeneticAlgorithm {
 
     fn mutate<R: Rng>(&self, individual: &mut Vec<u8>, rng: &mut R) {
         if rng.gen::<f64>() < self.mutation_prob {
-            // Use one of the mutation operations randomly
+            // Use one of the mutation operations randomly (only fixed-length operations)
             let r: f64 = rng.gen();
 
-            if r < 0.35 {
+            if r < 0.7 {
                 // Substitution mutation
                 let pos = rng.gen_range(0..individual.len());
                 let old = individual[pos];
@@ -107,15 +131,6 @@ impl GeneticAlgorithm {
                     new = rng.gen_range(0..20) as u8;
                 }
                 individual[pos] = new;
-            } else if r < 0.55 && individual.len() < 16 {
-                // Insertion mutation
-                let pos = rng.gen_range(0..=individual.len());
-                let aa = rng.gen_range(0..20) as u8;
-                individual.insert(pos, aa);
-            } else if r < 0.75 && individual.len() > 8 {
-                // Deletion mutation
-                let pos = rng.gen_range(0..individual.len());
-                individual.remove(pos);
             } else if individual.len() >= 2 {
                 // Swap mutation
                 let p1 = rng.gen_range(0..individual.len());
@@ -132,11 +147,72 @@ impl GeneticAlgorithm {
         population
             .iter()
             .min_by(|a, b| {
-                PeptideProblem::fitness(a)
-                    .partial_cmp(&PeptideProblem::fitness(b))
+                (PeptideProblem::fitness(a) as f64)
+                    .partial_cmp(&(combined_fitness(b) as f64))
                     .unwrap()
             })
             .unwrap()
             .clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+
+    #[test]
+    fn test_uniform_crossover() {
+        let ga = GeneticAlgorithm {
+            population_size: 10,
+            generations: 1,
+            crossover_prob: 1.0, // Always do crossover
+            crossover: Crossover::Uniform,
+            mutation_prob: 0.0, // No mutation for testing
+            tournament_size: 2,
+        };
+
+        let parent1 = vec![0, 1, 2, 3, 4];
+        let parent2 = vec![5, 6, 7, 8, 9];
+        let mut rng = StdRng::seed_from_u64(42);
+
+        let child = ga.crossover(&parent1, &parent2, &mut rng);
+
+        // Check that child has same length as parents
+        assert_eq!(child.len(), parent1.len());
+
+        // Check that each position comes from either parent1 or parent2
+        for (i, &value) in child.iter().enumerate() {
+            assert!(value == parent1[i] || value == parent2[i]);
+        }
+
+        println!("Parent1: {:?}", parent1);
+        println!("Parent2: {:?}", parent2);
+        println!("Child:   {:?}", child);
+    }
+
+    #[test]
+    fn test_single_point_crossover() {
+        let ga = GeneticAlgorithm {
+            population_size: 10,
+            generations: 1,
+            crossover_prob: 1.0, // Always do crossover
+            crossover: Crossover::SinglePoint,
+            mutation_prob: 0.0, // No mutation for testing
+            tournament_size: 2,
+        };
+
+        let parent1 = vec![0, 1, 2, 3, 4];
+        let parent2 = vec![5, 6, 7, 8, 9];
+        let mut rng = StdRng::seed_from_u64(42);
+
+        let child = ga.crossover(&parent1, &parent2, &mut rng);
+
+        // Check that child has same length as parents
+        assert_eq!(child.len(), parent1.len());
+
+        println!("Parent1: {:?}", parent1);
+        println!("Parent2: {:?}", parent2);
+        println!("Child:   {:?}", child);
     }
 }

@@ -1,3 +1,4 @@
+use crate::nepre;
 use crate::{
     data::{AA_LETTERS, BLOSUM62},
     problem::TSProblem,
@@ -32,6 +33,71 @@ pub const MOTIFS: [&[u8]; 13] = [
     b"KWRWKRWKK",              // Cell-penetrating peptide
 ];
 
+const HYDROPATHY: [f32; 20] = [
+    1.8, 2.5, -3.5, -3.5, 2.8, -0.4, -3.2, 4.5, -3.9, 3.8, 1.9, -3.5, -1.6, -3.5, -4.5, -0.8, -0.7,
+    4.2, -0.9, -1.3,
+];
+
+/// Returns `true` iff the peptide passes a few fast heuristics
+/// that make it resemble a viable, soluble biological sequence.
+///
+/// Current rules (easy to tweak):
+/// 1. Average hydropathy must be in -1.5 … +3.0  
+/// 2. No forbidden adjacent pairs  (“CC” or “PP”)  
+/// 3. No homopolymer run ≥ 4 identical residues
+pub fn is_biologically_valid(seq: &[u8]) -> bool {
+    if seq.is_empty() {
+        return false;
+    }
+
+    // --- average hydropathy ---
+    let avg_hydro: f32 =
+        seq.iter().map(|&aa| HYDROPATHY[aa as usize]).sum::<f32>() / (seq.len() as f32);
+    if !(-1.5..=3.0).contains(&avg_hydro) {
+        return false;
+    }
+
+    // --- forbidden adjacent pairs ---
+    // C = index 1, P = index 12 in AA_LETTERS
+    for win in seq.windows(2) {
+        if (win[0] == 1 && win[1] == 1) || (win[0] == 12 && win[1] == 12) {
+            return false;
+        }
+    }
+
+    // --- long homopolymers (≥4) ---
+    let mut run = 1usize;
+    for i in 1..seq.len() {
+        if seq[i] == seq[i - 1] {
+            run += 1;
+            if run >= 4 {
+                return false;
+            }
+        } else {
+            run = 1;
+        }
+    }
+
+    true
+}
+
+/// Combined energy  (lower = better).
+/// Decides automatically whether to align against the *current motif*
+/// or against *all motifs* (whichever `set_use_best_motif()` selected).
+pub fn combined_fitness(seq: &[u8]) -> f32 {
+    // --- BLOSUM term ---
+    let blosum_e = if get_use_best_motif() {
+        PeptideProblem::energy_best_motif(seq) as f32
+    } else {
+        PeptideProblem::energy(seq) as f32
+    };
+
+    // --- NEPRE term (pairwise neighbourhood energy) ---
+    let nepre_e: f32 = seq.windows(2).map(|w| nepre::pair(w[0], w[1])).sum();
+
+    blosum_e + nepre_e // we keep “minimise” convention
+}
+
 // Default motif index to use if none specified
 static mut CURRENT_MOTIF_IDX: usize = 0;
 
@@ -42,6 +108,12 @@ pub fn set_motif(index: usize) {
             CURRENT_MOTIF_IDX = index;
         }
     }
+}
+
+// Get current motif length
+pub fn current_motif_len() -> usize {
+    let motif_idx = unsafe { CURRENT_MOTIF_IDX };
+    MOTIFS[motif_idx].len()
 }
 
 lazy_static! {
@@ -131,19 +203,13 @@ impl TSProblem for PeptideProblem {
     type Move = Move;
 
     fn random_individual<R: Rng>(rng: &mut R) -> Self::Individ {
-        let len = rng.gen_range(8..=14);
+        let len = current_motif_len();
         (0..len).map(|_| rng.gen_range(0..20) as u8).collect()
     }
 
     fn fitness(ind: &Self::Individ) -> f64 {
-        // Use best_motif flag to decide which energy function to use
-        let use_best = unsafe { USE_BEST_MOTIF };
-
-        if use_best {
-            Self::energy_best_motif(ind) as f64
-        } else {
-            Self::energy(ind) as f64
-        }
+        // Use combined_fitness which already handles the USE_BEST_MOTIF flag internally
+        combined_fitness(ind) as f64
     }
 
     fn neighbourhood<R: Rng>(
@@ -157,7 +223,7 @@ impl TSProblem for PeptideProblem {
             let mut neigh = ind.clone();
             let r: f64 = rng.gen();
 
-            if r < 0.35 {
+            if r < 0.7 {
                 // ---------- SUBST ----------
                 let pos = rng.gen_range(0..neigh.len());
                 let old = neigh[pos];
@@ -167,17 +233,6 @@ impl TSProblem for PeptideProblem {
                 }
                 neigh[pos] = new;
                 out.push((neigh, Move::Subst { pos, old, new }));
-            } else if r < 0.55 && neigh.len() < 16 {
-                // ---------- INSERT ----------
-                let pos = rng.gen_range(0..=neigh.len());
-                let aa = rng.gen_range(0..20) as u8;
-                neigh.insert(pos, aa);
-                out.push((neigh, Move::Insert { pos, aa }));
-            } else if r < 0.75 && neigh.len() > 8 {
-                // ---------- DELETE ----------
-                let pos = rng.gen_range(0..neigh.len());
-                let aa = neigh.remove(pos);
-                out.push((neigh, Move::Delete { pos, aa }));
             } else {
                 // ---------- SWAP ----------
                 if neigh.len() >= 2 {
@@ -197,11 +252,26 @@ impl TSProblem for PeptideProblem {
     fn apply_move(ind: &mut Self::Individ, mv: &Self::Move) {
         match *mv {
             Move::Subst { pos, new, .. } => ind[pos] = new,
-            Move::Insert { pos, aa } => ind.insert(pos, aa),
-            Move::Delete { pos, .. } => {
-                ind.remove(pos);
-            }
             Move::Swap { p1, p2 } => ind.swap(p1, p2),
+            // Insert and Delete operations are no longer supported
+            Move::Insert { .. } => panic!("Insert operation not supported with fixed length"),
+            Move::Delete { .. } => panic!("Delete operation not supported with fixed length"),
+        }
+    }
+
+    fn repair(ind: &mut Self::Individ) {
+        let target_len = current_motif_len();
+
+        // Ensure the individual has exactly the target length
+        if ind.len() < target_len {
+            // If too short, extend with random amino acids
+            let mut rng = rand::thread_rng();
+            while ind.len() < target_len {
+                ind.push(rng.gen_range(0..20) as u8);
+            }
+        } else if ind.len() > target_len {
+            // If too long, truncate
+            ind.truncate(target_len);
         }
     }
 }
