@@ -20,7 +20,7 @@ impl Default for NeighCfg {
         Self {
             pop_size: 400,
             crossover_p: 0.9,
-            mutation_p: 0.3,
+            mutation_p: 0.25,
             smart_xover: true,
             max_gens: 500,
         }
@@ -102,9 +102,17 @@ impl<'a> NeighbourGA<'a> {
             PeptideProblem::repair(&mut child_a);
             PeptideProblem::repair(&mut child_b);
 
-            if self.cfg.smart_xover {
-                hill_climb_optimize(&mut child_a);
-                hill_climb_optimize(&mut child_b);
+            if self.cfg.smart_xover && self.rng.gen::<f32>() < 0.20 {
+                let lc_prob = if child_a.len() <= 5 { 0.60 } else { 0.20 };
+                if self.rng.gen::<f32>() < lc_prob {
+                    hill_climb_optimize(&mut child_a);
+                }
+            }
+            if self.cfg.smart_xover && self.rng.gen::<f32>() < 0.20 {
+                let lc_prob = if child_b.len() <= 5 { 0.60 } else { 0.20 };
+                if self.rng.gen::<f32>() < lc_prob {
+                    hill_climb_optimize(&mut child_b);
+                }
             }
 
             // —--- Biological-plausibility filter —---
@@ -136,6 +144,15 @@ impl<'a> NeighbourGA<'a> {
 
         self.population = next_pop;
         self.evaluate();
+        let (best_idx, _) = self.best();
+        let elite = self.population[best_idx].clone();
+        let pop_len = self.population.len();
+        let elite_present = self.population.contains(&elite);
+        if !elite_present {
+            // ensure not already present
+            let rnd_idx = self.rng.gen_range(0..pop_len);
+            self.population[rnd_idx] = elite;
+        }
     }
 
     fn tournament_pick(&mut self, k: usize) -> usize {
@@ -211,22 +228,33 @@ fn uniform_crossover(a: &[u8], b: &[u8], rng: &mut ThreadRng) -> (Vec<u8>, Vec<u
 
 fn smart_uniform(parent_a: &[u8], parent_b: &[u8], rng: &mut ThreadRng) -> Vec<u8> {
     let len = parent_a.len();
-    let mut child = Vec::with_capacity(len);
+    let mut child = parent_a.to_vec(); // start as clone of A (cheap)
 
-    child.push(if rng.gen::<bool>() {
-        parent_a[0]
-    } else {
-        parent_b[0]
-    });
+    for i in 0..len {
+        if parent_a[i] == parent_b[i] {
+            continue;
+        } // no choice to make
 
-    for i in 1..len {
-        let prev = child[i - 1];
-        let aa_a = parent_a[i];
-        let aa_b = parent_b[i];
-        let score_a = nepre::pair(prev, aa_a);
-        let score_b = nepre::pair(prev, aa_b);
-        child.push(if score_a >= score_b { aa_a } else { aa_b });
+        // try allele from B
+        let old = child[i];
+        child[i] = parent_b[i];
+        let fit_b = combined_fitness(&child);
+
+        // keep A's allele
+        child[i] = old;
+        let fit_a = combined_fitness(&child);
+
+        // choose the better allele (lower energy)
+        if fit_b < fit_a {
+            child[i] = parent_b[i];
+        }
     }
+
+    // randomise the first locus to keep diversity
+    if rng.gen::<bool>() {
+        child[0] = parent_b[0];
+    }
+
     child
 }
 

@@ -37,6 +37,7 @@ const HYDROPATHY: [f32; 20] = [
     1.8, 2.5, -3.5, -3.5, 2.8, -0.4, -3.2, 4.5, -3.9, 3.8, 1.9, -3.5, -1.6, -3.5, -4.5, -0.8, -0.7,
     4.2, -0.9, -1.3,
 ];
+const NEPRE_WEIGHT: f32 = 0.20;
 
 /// Returns `true` iff the peptide passes a few fast heuristics
 /// that make it resemble a viable, soluble biological sequence.
@@ -95,7 +96,7 @@ pub fn combined_fitness(seq: &[u8]) -> f32 {
     // --- NEPRE term (pairwise neighbourhood energy) ---
     let nepre_e: f32 = seq.windows(2).map(|w| nepre::pair(w[0], w[1])).sum();
 
-    blosum_e + nepre_e // we keep “minimise” convention
+    blosum_e + NEPRE_WEIGHT * nepre_e
 }
 
 // Default motif index to use if none specified
